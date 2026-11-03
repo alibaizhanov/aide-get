@@ -93,3 +93,13 @@ from install import Installer, notebook_config  # noqa: E402
 installer = Installer(notebook_config(lambda name: ""), release / "release", plan_only=False)
 installer.run()
 installer.w.secrets.put_secret(SCOPE, "license-key", string_value=key)   # updates need no key
+
+url = installer.w.apps.get(installer.cfg["app_name"]).url
+displayHTML(f"""
+<div style="font-family:system-ui,sans-serif;padding:24px 0">
+  <div style="font-size:20px;font-weight:600;margin-bottom:6px">AI Data Engineer is installed</div>
+  <div style="color:#555;margin-bottom:18px">Open it and create your first mart. The license key is saved in this workspace,
+    so you can delete it from the first cell now; updates are just Run all.</div>
+  <a href="{url}" target="_blank" style="display:inline-block;background:#111;color:#fff;padding:12px 22px;border-radius:10px;
+     font-size:16px;font-weight:600;text-decoration:none">Open AI Data Engineer &rarr;</a>
+</div>""")
