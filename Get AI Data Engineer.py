@@ -2,15 +2,40 @@
 # MAGIC %md
 # MAGIC # Get AI Data Engineer
 # MAGIC
-# MAGIC Installs or updates AI Data Engineer in this workspace. **Paste your license key and click Run all.**
-# MAGIC The key downloads the current release; it is then kept in this workspace's secret scope, so updates are just Run all.
+# MAGIC **1. Paste your license key between the quotes in the cell below. 2. Click Run all.** That's it: about 10 minutes,
+# MAGIC and the last line prints the link to the app.
 # MAGIC
-# MAGIC Run as a workspace admin. If the run asks for an Anthropic API key (workspaces without built-in Claude), paste it and run again.
-# MAGIC Everything is installed into this workspace; your data never leaves it.
+# MAGIC Everything is installed into this workspace; your data never leaves it. Run as a workspace admin. To update later,
+# MAGIC open this notebook and click Run all again: the key is remembered, so you can leave it empty.
+# MAGIC
+# MAGIC A yellow note about a changed `databricks-sdk` version during the run is expected.
 
 # COMMAND ----------
 
-# MAGIC %pip install "databricks-sdk==0.156.0" "psycopg[binary]" pyyaml --quiet
+LICENSE_KEY = ""   # paste your license key between the quotes
+
+# Optional: your own Anthropic API key. Not needed: the model access comes with your license.
+ANTHROPIC_API_KEY = ""
+
+import json
+import os
+
+# a missing key stops here, in seconds, before anything is downloaded or installed
+SCOPE = "aide"
+if not LICENSE_KEY.strip():
+    try:
+        LICENSE_KEY = dbutils.secrets.get(SCOPE, "license-key")   # updates: the key saved by the first install
+    except Exception:  # noqa: BLE001 - first install without a key
+        raise ValueError("The license key is empty: paste it between the quotes in LICENSE_KEY above, then click Run all") from None
+# the Python restart below clears variables: hand the keys over in a file only this user can read, deleted after use
+fd = os.open("/tmp/aide_get.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump({"license_key": LICENSE_KEY.strip(), "anthropic_api_key": ANTHROPIC_API_KEY.strip()}, f)
+print("License key found")
+
+# COMMAND ----------
+
+# MAGIC %pip install "databricks-sdk==0.156.0" "psycopg[binary]" pyyaml cryptography --quiet
 
 # COMMAND ----------
 
@@ -18,14 +43,10 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-dbutils.widgets.text("license_key", "", "1. License key (first install only)")
-dbutils.widgets.text("anthropic_api_key", "", "2. Anthropic API key (only if asked)")
-dbutils.widgets.dropdown("mode", "install", ["install", "plan"], "3. Mode")
-dbutils.widgets.text("version", "main", "Advanced: release version")
-
-# COMMAND ----------
-
+import base64
+import hashlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -35,16 +56,14 @@ import zipfile
 from pathlib import Path
 
 SCOPE = "aide"
-RELEASES = "https://api.github.com/repos/alibaizhanov/aide-install/zipball/"
+RELEASES = "https://api.github.com/repos/alibaizhanov/aide-install/zipball/main"
+with open("/tmp/aide_get.json") as f:
+    keys = json.load(f)
+os.remove("/tmp/aide_get.json")
+key, own_model_key = keys["license_key"], keys["anthropic_api_key"]
 
-key = dbutils.widgets.get("license_key").strip()
-if not key:   # updates: the key saved by the first install
-    try:
-        key = dbutils.secrets.get(SCOPE, "license-key")
-    except Exception:  # noqa: BLE001 - first install without a key
-        raise ValueError("Paste your license key into the License key field at the top, then Run all") from None
-req = urllib.request.Request(RELEASES + dbutils.widgets.get("version").strip(),
-                             headers={"Authorization": f"Bearer {key}", "Accept": "application/vnd.github+json", "User-Agent": "aide-get"})
+req = urllib.request.Request(RELEASES, headers={"Authorization": f"Bearer {key}", "Accept": "application/vnd.github+json",
+                                                "User-Agent": "aide-get"})
 try:
     data = urllib.request.urlopen(req, timeout=300).read()
 except urllib.error.HTTPError as e:
@@ -53,18 +72,24 @@ except urllib.error.HTTPError as e:
     raise
 root = Path(tempfile.mkdtemp())
 zipfile.ZipFile(io.BytesIO(data)).extractall(root)
-release = next(root.iterdir())   # the archive holds one folder: install.py, sql/, release/
+release = next(root.iterdir())   # the archive holds one folder: install.py, sql/, release/, model-keys/
 print(f"Release downloaded ({len(data) // 1024} KB)")
+
+# the model key that comes with the license: only this license key can find and decrypt it
+if own_model_key:
+    os.environ["ANTHROPIC_API_KEY"] = own_model_key
+else:
+    from cryptography.fernet import Fernet
+    sealed = release / "model-keys" / (hashlib.sha256(key.encode()).hexdigest()[:32] + ".enc")
+    if sealed.exists():
+        fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(("aide-model-key:" + key).encode()).digest()))
+        os.environ["ANTHROPIC_API_KEY"] = fernet.decrypt(sealed.read_bytes()).decode()
 
 # COMMAND ----------
 
 sys.path.insert(0, str(release))
 from install import Installer, notebook_config  # noqa: E402
 
-if dbutils.widgets.get("anthropic_api_key").strip():
-    os.environ["ANTHROPIC_API_KEY"] = dbutils.widgets.get("anthropic_api_key").strip()
-plan_only = dbutils.widgets.get("mode") != "install"
-installer = Installer(notebook_config(lambda name: ""), release / "release", plan_only=plan_only)
+installer = Installer(notebook_config(lambda name: ""), release / "release", plan_only=False)
 installer.run()
-if not plan_only:   # keep the key so that updates need no fields
-    installer.w.secrets.put_secret(SCOPE, "license-key", string_value=key)
+installer.w.secrets.put_secret(SCOPE, "license-key", string_value=key)   # updates need no key
